@@ -1,4 +1,12 @@
 # 이미지 캐시 (엑셀에는 임베드되므로 저장소엔 불필요)
 output/images/
+
+# 재생성 가능한 무거운 산출물 (data.json 으로 build_dashboard.py 재실행 시 생성)
+output/interestprint_dashboard.xlsx
+output/dashboard.html
+
 __pycache__/
 *.pyc
+
+# 실행 로그
+output/*.log

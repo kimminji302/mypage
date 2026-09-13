@@ -261,38 +261,113 @@ def enumerate_all_categories(session: requests.Session) -> list[tuple[str, str]]
     return list(seen.values())
 
 
-def scrape(categories, urls, countries, delay: float) -> list[Product]:
+def enrich_from_catalog(args) -> None:
+    """카탈로그 JSON(배송비 없음)을 읽어, 저단가 후보에만 배송비를 조회해 저장.
+
+    - 모든 제품은 결과에 그대로 유지되며(전체 단가 랭킹용),
+      선택된 후보만 shipping 이 채워진다.
+    """
+    data = json.loads(Path(args.from_catalog).read_text(encoding="utf-8"))
+    products = [Product(**{k: v for k, v in p.items() if k != "shipping"},
+                        shipping=[ShipOption(**o) for o in p.get("shipping", [])])
+                for p in data["products"]]
+
+    # 후보 선정: 원가(sale_price) 기준
+    priced = [p for p in products if p.sale_price is not None]
+    priced.sort(key=lambda p: p.sale_price)
+    candidates = priced
+    if args.max_price is not None:
+        candidates = [p for p in candidates if p.sale_price <= args.max_price]
+    if args.top_cheapest is not None:
+        candidates = candidates[:args.top_cheapest]
+
+    print(f"카탈로그 제품 {len(products)}개 중 배송비 조회 대상 {len(candidates)}개")
+    print(f"  (예상 요청 수 ≈ {len(candidates) * len(DEFAULT_COUNTRIES)})")
+
+    session = make_session()
+    out_path = Path(args.out)
+    done = 0
+    cand_pids = {p.pid for p in candidates}
+    for p in products:
+        if p.pid not in cand_pids:
+            continue
+        done += 1
+        print(f"[{done}/{len(candidates)}] [{p.pid}] 원가 {p.sale_price_text} — {p.name}")
+        p.shipping = []  # 재실행 대비 초기화
+        fetch_shipping(session, p, DEFAULT_COUNTRIES, args.delay)
+        if done % 25 == 0:
+            save_payload(products, DEFAULT_COUNTRIES, out_path)
+            print(f"    …체크포인트 저장")
+    save_payload(products, DEFAULT_COUNTRIES, out_path)
+    print(f"\n✓ 전체 {len(products)}개(후보 {len(candidates)}개 배송비 포함) 저장 → {out_path}")
+    print(f"  다음: python build_dashboard.py --data {out_path}")
+
+
+def save_payload(products, countries, out_path: Path) -> None:
+    payload = {
+        "source": "interestprint.com",
+        "countries": [{"name": n, "code": c} for n, c in countries],
+        "scraped_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "product_count": len(products),
+        "products": [asdict(p) for p in products],
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+
+
+def scrape(categories, urls, countries, delay: float, *,
+           fetch_ship: bool, out_path: Path, cat_names=None) -> list[Product]:
+    """카테고리/URL 을 순회하며 제품을 수집한다.
+
+    - fetch_ship=False 면 배송비 조회를 건너뛰고 카탈로그(가격 포함)만 수집(빠름).
+    - pid 기준으로 카테고리 간 중복 제품을 제거한다.
+    - 25개마다 out_path 에 체크포인트 저장(중단 대비).
+    """
     session = make_session()
     all_products: list[Product] = []
+    seen_pids: set[str] = set()
+    cat_names = cat_names or {}
 
-    for slug in categories:
+    total = len(categories)
+    for idx, slug in enumerate(categories, start=1):
         cat_url = f"{BASE}/custom/{slug}"
-        print(f"\n[카테고리] {slug}  ({cat_url})")
         resp = get(session, cat_url)
         if resp is None:
+            print(f"[{idx}/{total}] {slug}  ✗ 로드 실패")
             continue
-        # 카테고리 표시명 추출
         soup = BeautifulSoup(resp.text, "lxml")
         h1 = soup.select_one("h1")
-        cat_name = h1.get_text(strip=True) if h1 else slug
+        cat_name = cat_names.get(slug) or (h1.get_text(strip=True) if h1 else slug)
         products = parse_category_products(resp.text, slug, cat_name)
-        print(f"  제품 {len(products)}개 발견")
-        for p in products:
-            print(f"  - [{p.pid}] {p.name}  판매가 {p.sale_price_text or 'N/A'}")
-            fetch_shipping(session, p, countries, delay)
+        new = [p for p in products if p.pid not in seen_pids]
+        print(f"[{idx}/{total}] {slug}  ({cat_name}) — 제품 {len(products)}개, "
+              f"신규 {len(new)}개")
+        for p in new:
+            seen_pids.add(p.pid)
+            if fetch_ship:
+                print(f"  - [{p.pid}] {p.name}  판매가 {p.sale_price_text or 'N/A'}")
+                fetch_shipping(session, p, countries, delay)
             all_products.append(p)
+            if fetch_ship and len(all_products) % 25 == 0:
+                save_payload(all_products, countries, out_path)
+                print(f"    …체크포인트 저장 ({len(all_products)}개)")
         time.sleep(delay)
+        if not fetch_ship and idx % 25 == 0:
+            save_payload(all_products, countries, out_path)
 
     for url in urls:
-        print(f"\n[단일 제품] {url}")
+        print(f"[단일 제품] {url}")
         resp = get(session, url)
         if resp is None:
             continue
         p = parse_single_product(resp.text, url)
-        if p is None:
+        if p is None or p.pid in seen_pids:
             continue
+        seen_pids.add(p.pid)
         print(f"  [{p.pid}] {p.name}")
-        fetch_shipping(session, p, countries, delay)
+        if fetch_ship:
+            fetch_shipping(session, p, countries, delay)
         all_products.append(p)
 
     return all_products
@@ -313,12 +388,26 @@ def main() -> None:
                     help="/custom 인덱스의 전체 카테고리 수집 (242개, 매우 큼/느림)")
     ap.add_argument("--delay", type=float, default=0.8,
                     help="요청 사이 지연(초). 기본 0.8")
+    ap.add_argument("--no-shipping", action="store_true",
+                    help="배송비 조회 없이 제품 카탈로그(가격 포함)만 빠르게 수집")
+    ap.add_argument("--from-catalog",
+                    help="기존 카탈로그 JSON을 읽어 그 제품들에 배송비를 붙임(재수집 없음)")
+    ap.add_argument("--max-price", type=float,
+                    help="--from-catalog 사용 시: 원가(판매가) 이하 제품만 배송비 조회")
+    ap.add_argument("--top-cheapest", type=int,
+                    help="--from-catalog 사용 시: 원가가 낮은 순 상위 N개만 배송비 조회")
     ap.add_argument("--out", default=str(OUTPUT_DIR / "data.json"),
                     help="결과 JSON 경로")
     args = ap.parse_args()
 
+    # --------- 모드 B: 기존 카탈로그에서 후보만 배송비 보강 --------- #
+    if args.from_catalog:
+        enrich_from_catalog(args)
+        return
+
     session_for_all = make_session()
     categories: list[str] = list(args.category)
+    cat_names: dict[str, str] = {}
     if args.categories_file:
         for line in Path(args.categories_file).read_text(encoding="utf-8").splitlines():
             line = line.split("#", 1)[0].strip()  # 인라인 주석 제거
@@ -326,27 +415,24 @@ def main() -> None:
                 categories.append(line)
     if args.all:
         print("전체 카테고리 열거 중...")
-        categories = [slug for slug, _ in enumerate_all_categories(session_for_all)]
+        for slug, name in enumerate_all_categories(session_for_all):
+            categories.append(slug)
+            cat_names[slug] = name
         print(f"  {len(categories)}개 카테고리")
 
     if not categories and not args.url:
         ap.error("최소한 --category, --categories-file, --all, --url 중 하나가 필요합니다.")
 
-    products = scrape(categories, args.url, DEFAULT_COUNTRIES, args.delay)
-
     out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "source": "interestprint.com",
-        "countries": [{"name": n, "code": c} for n, c in DEFAULT_COUNTRIES],
-        "scraped_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "product_count": len(products),
-        "products": [asdict(p) for p in products],
-    }
-    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
-                        encoding="utf-8")
+    products = scrape(categories, args.url, DEFAULT_COUNTRIES, args.delay,
+                      fetch_ship=not args.no_shipping, out_path=out_path,
+                      cat_names=cat_names)
+    save_payload(products, DEFAULT_COUNTRIES, out_path)
     print(f"\n✓ 제품 {len(products)}개 저장 → {out_path}")
-    print(f"  다음: python build_dashboard.py --data {out_path}")
+    if args.no_shipping:
+        print("  (배송비 미포함 카탈로그) 다음: --no-shipping 없이 재실행하면 배송비 추가")
+    else:
+        print(f"  다음: python build_dashboard.py --data {out_path}")
 
 
 if __name__ == "__main__":
