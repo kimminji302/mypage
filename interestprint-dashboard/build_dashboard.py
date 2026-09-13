@@ -46,6 +46,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
 THUMB = 90
+IMG_EMBED_CAP = 200  # '저단가 판매후보' 시트에 썸네일 임베드할 최대 개수(용량 관리)
 HEADER_FILL = PatternFill("solid", fgColor="1F2937")
 HEADER_FONT = Font(color="FFFFFF", bold=True, size=11)
 THIN = Side(style="thin", color="D1D5DB")
@@ -134,15 +135,21 @@ def build_excel(data: dict, xlsx_path: Path) -> None:
         ws.column_dimensions[get_column_letter(i)].width = w
 
     row = 2
-    for p in candidates:
-        ws.row_dimensions[row].height = THUMB * 0.78
-        img_path = download_image(p.get("image", ""), p["pid"])
-        if img_path:
-            try:
-                xi = XLImage(str(img_path)); xi.width = xi.height = THUMB
-                ws.add_image(xi, f"A{row}")
-            except Exception:  # noqa: BLE001
-                pass
+    for i, p in enumerate(candidates):
+        embed = i < IMG_EMBED_CAP  # 원가 낮은 순 상위 N개만 이미지 임베드(용량 관리)
+        if embed:
+            ws.row_dimensions[row].height = THUMB * 0.78
+            img_path = download_image(p.get("image", ""), p["pid"])
+            if img_path:
+                try:
+                    xi = XLImage(str(img_path)); xi.width = xi.height = THUMB
+                    ws.add_image(xi, f"A{row}")
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            ic = ws.cell(row=row, column=1, value="이미지 보기")
+            ic.hyperlink = p.get("image", "")
+            ic.font = Font(color="2563EB", underline="single", size=9)
         ws.cell(row=row, column=2, value=p.get("pid", ""))
         ws.cell(row=row, column=3, value=p.get("name", ""))
         ws.cell(row=row, column=4, value=p.get("category_name", ""))
