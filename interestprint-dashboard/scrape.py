@@ -272,6 +272,22 @@ def enrich_from_catalog(args) -> None:
                         shipping=[ShipOption(**o) for o in p.get("shipping", [])])
                 for p in data["products"]]
 
+    # 점진적 확대: 기존 결과(out_path)에 이미 받은 배송비가 있으면 재사용
+    out_path = Path(args.out)
+    prior: dict[str, list] = {}
+    if out_path.exists():
+        try:
+            old = json.loads(out_path.read_text(encoding="utf-8"))
+            prior = {p["pid"]: p.get("shipping", []) for p in old["products"]
+                     if p.get("shipping")}
+        except (json.JSONDecodeError, KeyError):
+            prior = {}
+    if prior:
+        for p in products:
+            if p.pid in prior and not p.shipping:
+                p.shipping = [ShipOption(**o) for o in prior[p.pid]]
+        print(f"  기존 배송비 재사용: {len(prior)}개")
+
     # 후보 선정: 원가(sale_price) 기준
     priced = [p for p in products if p.sale_price is not None]
     priced.sort(key=lambda p: p.sale_price)
@@ -281,19 +297,17 @@ def enrich_from_catalog(args) -> None:
     if args.top_cheapest is not None:
         candidates = candidates[:args.top_cheapest]
 
-    print(f"카탈로그 제품 {len(products)}개 중 배송비 조회 대상 {len(candidates)}개")
-    print(f"  (예상 요청 수 ≈ {len(candidates) * len(DEFAULT_COUNTRIES)})")
+    cand_pids = {p.pid for p in candidates}
+    todo = [p for p in products if p.pid in cand_pids and not p.shipping]
+    print(f"카탈로그 제품 {len(products)}개 중 배송비 조회 대상 {len(candidates)}개 "
+          f"(신규 {len(todo)}개, 기존 재사용 {len(candidates) - len(todo)}개)")
+    print(f"  (신규 예상 요청 수 ≈ {len(todo) * len(DEFAULT_COUNTRIES)})")
 
     session = make_session()
-    out_path = Path(args.out)
     done = 0
-    cand_pids = {p.pid for p in candidates}
-    for p in products:
-        if p.pid not in cand_pids:
-            continue
+    for p in todo:
         done += 1
-        print(f"[{done}/{len(candidates)}] [{p.pid}] 원가 {p.sale_price_text} — {p.name}")
-        p.shipping = []  # 재실행 대비 초기화
+        print(f"[{done}/{len(todo)}] [{p.pid}] 원가 {p.sale_price_text} — {p.name}")
         fetch_shipping(session, p, DEFAULT_COUNTRIES, args.delay)
         if done % 25 == 0:
             save_payload(products, DEFAULT_COUNTRIES, out_path)

@@ -37,6 +37,8 @@ from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
+from html_view import build_html  # 인터랙티브 필터 대시보드
+
 HERE = Path(__file__).resolve().parent
 OUTPUT_DIR = HERE / "output"
 IMG_CACHE = OUTPUT_DIR / "images"
@@ -282,105 +284,6 @@ def build_csv(data: dict, csv_path: Path) -> None:
 
 # --------------------------------------------------------------------------- #
 # HTML (후보)
-# --------------------------------------------------------------------------- #
-def build_html(data: dict, html_path: Path) -> None:
-    countries = [c["name"] for c in data["countries"]]
-    candidates = [p for p in data["products"] if p.get("shipping")]
-    candidates.sort(key=lambda p: (p.get("sale_price") is None, p.get("sale_price") or 0))
-    esc = html_lib.escape
-
-    cards = []
-    for p in candidates:
-        grouped = shipping_by_country(p)
-        ship_html = []
-        for cname in countries:
-            opts = grouped.get(cname, [])
-            mp = min_price(opts)
-            rows = "".join(
-                f'<tr><td>{esc(o["carrier"])}</td>'
-                f'<td class="pr">{esc(o["price_text"] or "-")}</td></tr>'
-                for o in opts) or '<tr><td colspan="2">배송 옵션 없음</td></tr>'
-            mp_txt = f"${mp:,.2f}" if mp is not None else "-"
-            ship_html.append(f'<div class="country"><div class="chead"><span>{esc(cname)}</span>'
-                             f'<span class="min">최저 {mp_txt}</span></div>'
-                             f'<table class="stbl"><tbody>{rows}</tbody></table></div>')
-        m, pct = margin(p)
-        sale = f'${p["sale_price"]:,.2f}' if p.get("sale_price") is not None else "-"
-        retail = f'${p["retail_price"]:,.2f}' if p.get("retail_price") is not None else ""
-        margin_txt = (f'<span class="mg">마진 ${m:,.2f} ({pct:.0f}%)</span>'
-                      if m is not None else "")
-        img = p.get("image", "")
-        if img.startswith("//"):
-            img = "https:" + img
-        cards.append(f"""
-        <div class="card">
-          <a href="{esc(p.get('url',''))}" target="_blank" rel="noopener">
-            <img loading="lazy" src="{esc(img)}" alt="{esc(p.get('name',''))}"></a>
-          <div class="body">
-            <div class="cat">{esc(p.get('category_name',''))}</div>
-            <a class="name" href="{esc(p.get('url',''))}" target="_blank" rel="noopener">{esc(p.get('name',''))}</a>
-            <div class="price"><span class="sale">{sale}</span>
-              {'<span class="retail">'+retail+'</span>' if retail else ''}{margin_txt}</div>
-            <div class="ship">{''.join(ship_html)}</div>
-          </div>
-        </div>""")
-
-    doc = f"""<!doctype html>
-<html lang="ko"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>InterestPrint 저단가 판매후보</title>
-<style>
-  :root {{ color-scheme: light dark; }}
-  * {{ box-sizing: border-box; }}
-  body {{ margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Malgun Gothic",sans-serif;
-         background:#f6f7f9; color:#1f2937; }}
-  header {{ background:#111827; color:#fff; padding:20px 24px; }}
-  header h1 {{ margin:0 0 4px; font-size:20px; }}
-  header p {{ margin:0; color:#9ca3af; font-size:13px; }}
-  .grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr));
-           gap:16px; padding:20px; max-width:1400px; margin:0 auto; }}
-  .card {{ background:#fff; border:1px solid #e5e7eb; border-radius:12px; overflow:hidden;
-           display:flex; flex-direction:column; }}
-  .card > a {{ display:block; background:#fff; text-align:center; }}
-  .card img {{ width:100%; max-width:220px; height:auto; margin:12px auto 0; }}
-  .body {{ padding:12px 14px 16px; display:flex; flex-direction:column; gap:8px; }}
-  .cat {{ font-size:11px; color:#6b7280; text-transform:uppercase; letter-spacing:.03em; }}
-  .name {{ font-weight:600; font-size:14px; line-height:1.35; color:#111827; text-decoration:none; }}
-  .name:hover {{ color:#2563eb; }}
-  .price {{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }}
-  .sale {{ font-size:18px; font-weight:700; color:#dc2626; }}
-  .retail {{ font-size:13px; color:#9ca3af; text-decoration:line-through; }}
-  .mg {{ font-size:12px; color:#059669; font-weight:600; }}
-  .ship {{ display:flex; flex-direction:column; gap:8px; margin-top:4px; }}
-  .country {{ border:1px solid #eef0f3; border-radius:8px; overflow:hidden; }}
-  .chead {{ display:flex; justify-content:space-between; align-items:center;
-            background:#eef2ff; padding:6px 10px; font-size:12px; font-weight:600; }}
-  .chead .min {{ color:#4338ca; }}
-  .stbl {{ width:100%; border-collapse:collapse; font-size:12px; }}
-  .stbl td {{ padding:4px 10px; border-top:1px solid #f1f2f4; }}
-  .stbl td.pr {{ text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }}
-  @media (prefers-color-scheme: dark) {{
-    body {{ background:#0b0f17; color:#e5e7eb; }}
-    .card {{ background:#111827; border-color:#1f2937; }}
-    .card > a {{ background:#fff; }}
-    .name {{ color:#f3f4f6; }}
-    .country {{ border-color:#1f2937; }}
-    .chead {{ background:#1e293b; }}
-    .chead .min {{ color:#a5b4fc; }}
-    .stbl td {{ border-color:#1f2937; }}
-  }}
-</style></head><body>
-<header>
-  <h1>InterestPrint 저단가 판매후보 (원가 낮은 순)</h1>
-  <p>후보 {len(candidates)}개 · 조회 국가: {esc(', '.join(countries))} (수량 1개 기준) · 수집 {esc(data.get('scraped_at',''))}</p>
-</header>
-<div class="grid">{''.join(cards)}</div>
-</body></html>"""
-    html_path.parent.mkdir(parents=True, exist_ok=True)
-    html_path.write_text(doc, encoding="utf-8")
-    print(f"✓ HTML 저장 → {html_path}")
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description="InterestPrint 판매후보 분석 빌더")
     ap.add_argument("--data", default=str(OUTPUT_DIR / "data.json"))
