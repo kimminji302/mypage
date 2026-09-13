@@ -1,0 +1,10 @@
+# InterestPrint 수집 대상 카테고리 (슬러그-ID). '#' 는 주석.
+# 슬러그는 /custom 인덱스 페이지의 링크에서 확인. 필요한 만큼 추가하세요.
+# 전체 242개 카테고리를 긁으려면 categories.txt 대신  --all  옵션 사용.
+
+lunch_boxes-248      # Lunch Bags (주신 제품 포함)
+cosmetic_bags-264    # Cosmetic Bags
+aprons-271           # Aprons
+phone_cases-943      # Phone Cases
+drawstring_bags-249  # Drawstring Bags
+waist_bags-307       # Waist Bags

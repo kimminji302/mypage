@@ -1,0 +1,4 @@
+# 이미지 캐시 (엑셀에는 임베드되므로 저장소엔 불필요)
+output/images/
+__pycache__/
+*.pyc
